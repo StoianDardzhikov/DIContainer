@@ -1,17 +1,23 @@
 package org.example;
 
-import org.example.Annotations.Default;
-import org.example.Annotations.Inject;
-import org.example.Annotations.Named;
+import org.example.Annotations.*;
+import org.example.Classes.Loaded;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
+import java.lang.reflect.*;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Properties;
 
 public class Container {
     HashMap<String, Object> keyInstances = new HashMap<>();
     HashMap<Class<?>, Object> classInstances = new HashMap<>();
     HashMap<Class<?>, Class<?>> implementations = new HashMap<>();
+
+    public Container() {}
+
+    public Container(Properties properties) {
+        properties.putAll(keyInstances);
+    }
 
     public Object getInstance(String key) {
         return keyInstances.get(key);
@@ -24,13 +30,13 @@ public class Container {
         }
         T instance = (T) classInstances.get(keyClass);
         if (instance == null)
-            instance = (T) createInstance(keyClass, true);
+            instance = (T) createInstance(keyClass, true, new HashSet<>());
         classInstances.put(keyClass, instance);
         return instance;
     }
 
     public void decorateInstance(Object o) throws Exception {
-        addFields(o.getClass(), o, false);
+        addFields(o.getClass(), o, false, new HashSet<>());
     }
 
     public void registerInstance(String key, Object instance) throws ContainerException {
@@ -69,26 +75,41 @@ public class Container {
         if (constructor == null)
             instance = c.getDeclaredConstructor().newInstance();
         else {
-            Class<?>[] parameters = constructor.getParameterTypes();
+            constructor.getParameters()[0].getName();
+            Parameter[] parameters = constructor.getParameters();
             Object[] objects = new Object[parameters.length];
             for (int i = 0; i < parameters.length; i++) {
-                objects[i] = constructInstance(parameters[i], addToContainer);
+                NamedParameter namedParameter = parameters[i].getAnnotation(NamedParameter.class);
+                if (namedParameter != null) {
+                    String name = namedParameter.value();
+                    Object parameter = keyInstances.get(name);
+                    if (parameter != null) {
+                        objects[i] = parameter;
+                        continue;
+                    }
+                }
+                objects[i] = createInstance(parameters[i].getType(), addToContainer, new HashSet<>());
             }
             instance = constructor.newInstance(objects);
         }
 
         if (addToContainer)
             classInstances.put(c, instance);
+
         return (T) instance;
     }
 
-    private <T> T createInstance(Class<T> c, boolean addToContainer) throws Exception {
+    private <T> T createInstance(Class<T> c, boolean addToContainer, HashSet<Class<?>> passedClasses) throws Exception {
         T instance = constructInstance(c, addToContainer);
-        addFields(c, instance, addToContainer);
+        passedClasses.add(c);
+        addFields(c, instance, addToContainer, passedClasses);
+        if (Initializer.class.isAssignableFrom(c)) {
+            invokeInit(instance);
+        }
         return instance;
     }
 
-    private <T> void addFields(Class<T> c, Object instance, boolean addToContainer) throws Exception {
+    private <T> void addFields(Class<T> c, Object instance, boolean addToContainer, HashSet<Class<?>> passedClasses) throws Exception {
         Field[] declaredFields = c.getDeclaredFields();
         for (Field field : declaredFields) {
             Inject inject = field.getAnnotation(Inject.class);
@@ -104,6 +125,8 @@ public class Container {
                 }
             }
             Class<?> fieldType = field.getType();
+            if (passedClasses.contains(fieldType))
+                throw new ContainerException("Circular dependency found!");
             if (fieldType.isInterface()) {
                 Object implementationInstance = getInterfaceImplementation(fieldType);
                 field.set(instance, implementationInstance);
@@ -114,9 +137,34 @@ public class Container {
                 field.set(instance, fieldClassInstance);
                 continue;
             }
-            fieldClassInstance = createInstance(fieldType, addToContainer);
+            fieldClassInstance = createInstance(fieldType, addToContainer, passedClasses);
+            Lazy lazy = field.getAnnotation(Lazy.class);
+            if (lazy != null) {
+                fieldClassInstance = createProxy(fieldType);
+                System.out.println(fieldClassInstance.getClass() + " <- class");
+            }
             field.set(instance, fieldClassInstance);
         }
+    }
+
+    private <T> T createProxy(Class<T> proxyClass) {
+        InvocationHandler invocationHandler = (Object proxy, Method method, Object[] args) -> {
+            Object loadedInstance = classInstances.get(proxyClass);
+            if (loadedInstance == null) {
+                loadedInstance = createInstance(proxyClass, true, new HashSet<>());
+                classInstances.put(proxyClass, loadedInstance);
+            }
+            return method.invoke(loadedInstance);
+        };
+
+        T proxy = (T) Proxy.newProxyInstance(Loaded.class.getClassLoader(), new Class[]{}, invocationHandler);
+        return proxy;
+    }
+
+    private void invokeInit(Object instance) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+        Class<?> c = instance.getClass();
+        Method method = c.getMethod("init");
+        method.invoke(instance);
     }
 
     private Object getInterfaceImplementation(Class<?> interfaceClass) throws Exception {

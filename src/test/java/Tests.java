@@ -89,4 +89,22 @@ public class Tests {
         assertNotNull(ci.bField);
         assertNotNull(ci.bField.aField);
     }
+
+    @Test
+    public void initializer() throws Exception {
+        String email = "name@yahoo.com";
+        r.registerInstance("email", email);
+        FSI inst = r.getInstance(FSI.class);
+
+        assertNotNull(inst);
+        assertNotNull(inst.email);
+        assertEquals("mailto:" + email, inst.email);
+    }
+
+    @Test
+    public void findsCircularDependency() {
+        assertThrows(ContainerException.class, () -> {
+            r.getInstance(Circular.class);
+        });
+    }
 }
