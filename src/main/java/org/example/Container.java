@@ -1,22 +1,40 @@
 package org.example;
 
 import org.example.Annotations.*;
-import org.example.Classes.Loaded;
+import org.example.Classes.B;
+import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.reflect.*;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class Container {
     HashMap<String, Object> keyInstances = new HashMap<>();
     HashMap<Class<?>, Object> classInstances = new HashMap<>();
     HashMap<Class<?>, Class<?>> implementations = new HashMap<>();
+    BeanFactoryPostProcessor beanFactoryPostProcessor;
 
     public Container() {}
 
     public Container(Properties properties) {
-        properties.putAll(keyInstances);
+        beanFactoryPostProcessor = new BeanFactoryPostProcessor(properties);
+    }
+
+    public Container(Class<?> configClass) throws IOException {
+        PropertiesSource propertiesSource = configClass.getAnnotation(PropertiesSource.class);
+        if (propertiesSource == null)
+            return;
+        String fileName = propertiesSource.value();
+        Properties properties = new Properties();
+        properties.loadFromXML(new FileInputStream(fileName));
+        beanFactoryPostProcessor = new BeanFactoryPostProcessor(properties);
     }
 
     public Object getInstance(String key) {
@@ -103,12 +121,13 @@ public class Container {
         T instance = constructInstance(c, addToContainer);
         passedClasses.add(c);
         addFields(c, instance, addToContainer, passedClasses);
+        if (beanFactoryPostProcessor != null)
+            beanFactoryPostProcessor.processProperties(instance);
         if (Initializer.class.isAssignableFrom(c)) {
             invokeInit(instance);
         }
         return instance;
     }
-
     private <T> void addFields(Class<T> c, Object instance, boolean addToContainer, HashSet<Class<?>> passedClasses) throws Exception {
         Field[] declaredFields = c.getDeclaredFields();
         for (Field field : declaredFields) {
@@ -125,8 +144,15 @@ public class Container {
                 }
             }
             Class<?> fieldType = field.getType();
-            if (passedClasses.contains(fieldType))
+            if (passedClasses.contains(fieldType)) {
+                Object fieldInstance = classInstances.get(fieldType);
+                if(fieldInstance != null) {
+                    field.set(fieldInstance, instance);
+                    continue;
+                }
                 throw new ContainerException("Circular dependency found!");
+            }
+
             if (fieldType.isInterface()) {
                 Object implementationInstance = getInterfaceImplementation(fieldType);
                 field.set(instance, implementationInstance);
@@ -140,25 +166,21 @@ public class Container {
             fieldClassInstance = createInstance(fieldType, addToContainer, passedClasses);
             Lazy lazy = field.getAnnotation(Lazy.class);
             if (lazy != null) {
-                fieldClassInstance = createProxy(fieldType);
-                System.out.println(fieldClassInstance.getClass() + " <- class");
+                fieldClassInstance = createMock(fieldType, field, instance);
             }
             field.set(instance, fieldClassInstance);
         }
     }
 
-    private <T> T createProxy(Class<T> proxyClass) {
-        InvocationHandler invocationHandler = (Object proxy, Method method, Object[] args) -> {
-            Object loadedInstance = classInstances.get(proxyClass);
-            if (loadedInstance == null) {
-                loadedInstance = createInstance(proxyClass, true, new HashSet<>());
-                classInstances.put(proxyClass, loadedInstance);
-            }
-            return method.invoke(loadedInstance);
-        };
+    private <T> T createMock(Class<T> mockClass, Field field, Object parent) {
+        T mock = Mockito.mock(mockClass);
+        Mockito.mock(mockClass, invocation -> {
+            T instance = createInstance(mockClass, true, new HashSet<>());
+            field.set(parent, instance);
+            return invocation;
+        });
 
-        T proxy = (T) Proxy.newProxyInstance(Loaded.class.getClassLoader(), new Class[]{}, invocationHandler);
-        return proxy;
+        return mock;
     }
 
     private void invokeInit(Object instance) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
